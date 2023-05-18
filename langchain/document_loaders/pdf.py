@@ -389,3 +389,108 @@ class PDFPlumberLoader(BasePDFLoader):
         parser = PDFPlumberParser(text_kwargs=self.text_kwargs)
         blob = Blob.from_path(self.file_path)
         return parser.parse(blob)
+
+
+class DeepSearchPDFLoader(BasePDFLoader):
+    def __init__(
+        self,
+        file_path: str,
+        max_wait_time_seconds: int = 500,
+        mode: str = "pages",  # pages or segments
+        **kwargs: Any,
+    ) -> None:
+        """Initialize with file path."""
+        try:
+            import deepsearch as ds  # noqa:F401
+        except ImportError:
+            raise ValueError(
+                "deepsearch-toolkit package not found, please install it with "
+                "`pip install deepsearch-toolkit`"
+            )
+
+        super().__init__(file_path)
+        self.deepsearch_username = get_from_dict_or_env(
+            kwargs, "deepsearch_username", "DEEPSEARCH_USERNAME"
+        )
+        self.deepsearch_api_key = get_from_dict_or_env(
+            kwargs, "deepsearch_api_key", "DEEPSEARCH_API_KEY"
+        )
+        self.deepsearch_host = get_from_dict_or_env(
+            kwargs, "deepsearch_host", "DEEPSEARCH_HOST", "https://deepsearch-experience.res.ibm.com"
+        )
+        self.deepsearch_proj_key = get_from_dict_or_env(
+            kwargs, "deepsearch_proj_key", "DEEPSEARCH_PROJ_KEY", "1234567890abcdefghijklmnopqrstvwyz123456"
+        )
+        self.max_wait_time_seconds = max_wait_time_seconds
+        self.mode = mode
+
+        # API key authorization
+        auth = ds.DeepSearchKeyAuth(
+            username=self.deepsearch_username,
+            api_key=self.deepsearch_api_key,
+        )
+        config = ds.DeepSearchConfig(
+            host=self.deepsearch_host,
+            auth=auth,
+        )
+
+        client = ds.CpsApiClient(config)
+        self.api = ds.CpsApi(client)
+
+
+    def load(self) -> List[Document]:
+        import deepsearch as ds
+        import json
+        import tempfile
+        from zipfile import ZipFile    
+    
+        documents = ds.convert_documents(
+            api=self.api, proj_key=self.deepsearch_proj_key, source_path=self.file_path, progress_bar=True
+        )
+
+        # TODO: cleanup tempfile
+        output_dir = tempfile.mkdtemp()
+        documents.download_all(result_dir=output_dir, progress_bar=True)
+
+        converted_docs = {}
+        for output_file in Path(output_dir).rglob("json*.zip"):
+            with ZipFile(output_file) as archive:
+                all_files = archive.namelist()
+                for name in all_files:
+                    if not name.endswith(".json"):
+                        continue
+
+                    doc_jsondata = json.loads(archive.read(name))
+                    converted_docs[f"{output_file}//{name}"] = doc_jsondata
+
+        result_documents = []
+        for doc in converted_docs.values():
+
+            doc_title = doc.get("description").get("title")
+            prev_page = 1
+            page_contents = ""
+            for idx, text_segment in enumerate(doc["main-text"]):
+                current_page = text_segment.get("prov", [{}])[0].get("page")
+                if prev_page != current_page:
+                    if self.mode == "pages":
+                        metadata = {"source": self.source, "file_path": self.source, "page": prev_page, "title": doc_title}
+                        result_documents.append(Document(page_content=page_contents, metadata=metadata))
+                    page_contents = ""
+
+                prev_page = current_page
+                if "text" not in text_segment:
+                    continue
+                
+                page_contents += text_segment.get("text", "") + "\n"
+
+                if self.mode == "segments":
+                    metadata = {"source": self.source, "file_path": self.source, "page": current_page, "segment_id": idx, "segment_type": text_segment.get("type"), "title": doc_title}
+                    result_documents.append(Document(page_content=text_segment.get("text", ""), metadata=metadata))
+
+            # Add last page
+            if self.mode == "pages":
+                metadata = {"source": self.source, "file_path": self.source, "page": prev_page, "title": doc_title}
+                result_documents.append(Document(page_content=page_contents, metadata=metadata))
+
+        return result_documents
+

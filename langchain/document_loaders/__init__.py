@@ -67,6 +67,7 @@ from langchain.document_loaders.pdf import (
     PyPDFium2Loader,
     PyPDFLoader,
     UnstructuredPDFLoader,
+    DeepSearchPDFLoader,
 )
 from langchain.document_loaders.powerpoint import UnstructuredPowerPointLoader
 from langchain.document_loaders.python import PythonLoader
